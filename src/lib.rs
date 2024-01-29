@@ -10,6 +10,7 @@ use virt_io::{
     strip_sockets_virt, strip_stdio_virt, VirtStdio,
 };
 use wasm_metadata::Producers;
+#[cfg(feature = "wasm-opt")]
 use wasm_opt::{Feature, OptimizationOptions};
 use wit_component::{metadata, ComponentEncoder, StringEncoding};
 
@@ -58,6 +59,7 @@ pub struct WasiVirt {
     pub sockets: Option<bool>,
     /// Random virtualization
     pub random: Option<bool>,
+    #[cfg(feature = "wasm-opt")]
     /// Disable wasm-opt run if desired
     pub wasm_opt: Option<bool>,
 }
@@ -65,6 +67,7 @@ pub struct WasiVirt {
 pub struct VirtResult {
     pub adapter: Vec<u8>,
     pub virtual_files: VirtualFiles,
+    pub module: Vec<u8>,
 }
 
 impl WasiVirt {
@@ -126,6 +129,7 @@ impl WasiVirt {
         self.stdio.get_or_insert_with(Default::default)
     }
 
+    #[cfg(feature = "wasm-opt")]
     pub fn opt(&mut self, opt: bool) {
         self.wasm_opt = Some(opt);
     }
@@ -303,26 +307,30 @@ impl WasiVirt {
 
         let mut bytes = module.emit_wasm();
 
-        // because we rely on dead code ellimination to remove unnecessary adapter code
-        // we save into a temporary file and run wasm-opt before returning
-        // this can be disabled with wasm_opt: false
-        if self.wasm_opt.unwrap_or(true) {
-            let dir = env::temp_dir();
-            let tmp_input = dir.join(format!("virt.core.input.{}.wasm", timestamp()));
-            let tmp_output = dir.join(format!("virt.core.output.{}.wasm", timestamp()));
-            fs::write(&tmp_input, bytes)
-                .with_context(|| "Unable to write temporary file for wasm-opt call on adapter")?;
-            OptimizationOptions::new_optimize_for_size_aggressively()
-                .enable_feature(Feature::ReferenceTypes)
-                .run(&tmp_input, &tmp_output)
-                .with_context(|| "Unable to apply wasm-opt optimization to virt. This can be disabled with wasm_opt: false.")
-                .or_else(|e| {
-                    fs::remove_file(&tmp_input)?;
-                    Err(e)
+        #[cfg(feature = "wasm-opt")]
+        {
+            // because we rely on dead code ellimination to remove unnecessary adapter code
+            // we save into a temporary file and run wasm-opt before returning
+            // this can be disabled with wasm_opt: false
+            if self.wasm_opt.unwrap_or(true) {
+                let dir = env::temp_dir();
+                let tmp_input = dir.join(format!("virt.core.input.{}.wasm", timestamp()));
+                let tmp_output = dir.join(format!("virt.core.output.{}.wasm", timestamp()));
+                fs::write(&tmp_input, bytes).with_context(|| {
+                    "Unable to write temporary file for wasm-opt call on adapter"
                 })?;
-            bytes = fs::read(&tmp_output)?;
-            fs::remove_file(&tmp_input)?;
-            fs::remove_file(&tmp_output)?;
+                OptimizationOptions::new_optimize_for_size_aggressively()
+                    .enable_feature(Feature::ReferenceTypes)
+                    .run(&tmp_input, &tmp_output)
+                    .with_context(|| "Unable to apply wasm-opt optimization to virt. This can be disabled with wasm_opt: false.")
+                    .or_else(|e| {
+                        fs::remove_file(&tmp_input)?;
+                        Err(e)
+                    })?;
+                bytes = fs::read(&tmp_output)?;
+                fs::remove_file(&tmp_input)?;
+                fs::remove_file(&tmp_output)?;
+            }
         }
 
         // now adapt the virtualized component
@@ -332,6 +340,7 @@ impl WasiVirt {
         Ok(VirtResult {
             adapter: encoded,
             virtual_files,
+            module: bytes,
         })
     }
 }
